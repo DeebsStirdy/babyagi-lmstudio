@@ -28,7 +28,7 @@ client = chromadb.Client(Settings(anonymized_telemetry=False))
 LLM_MODEL = os.getenv("LLM_MODEL", os.getenv("OPENAI_API_MODEL", "gpt-3.5-turbo")).lower()
 
 # API Keys
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+OPENAI_API_KEY = ''
 if not (LLM_MODEL.startswith("llama") or LLM_MODEL.startswith("human")):
     assert OPENAI_API_KEY, "\033[91m\033[1m" + "OPENAI_API_KEY environment variable is missing from .env" + "\033[0m\033[0m"
 
@@ -102,49 +102,7 @@ print(f"LLM   : {LLM_MODEL}")
 # Check if we know what we are doing
 assert OBJECTIVE, "\033[91m\033[1m" + "OBJECTIVE environment variable is missing from .env" + "\033[0m\033[0m"
 assert INITIAL_TASK, "\033[91m\033[1m" + "INITIAL_TASK environment variable is missing from .env" + "\033[0m\033[0m"
-
-LLAMA_MODEL_PATH = os.getenv("LLAMA_MODEL_PATH", "models/llama-13B/ggml-model.bin")
-if LLM_MODEL.startswith("llama"):
-    if can_import("llama_cpp"):
-        from llama_cpp import Llama
-
-        print(f"LLAMA : {LLAMA_MODEL_PATH}" + "\n")
-        assert os.path.exists(LLAMA_MODEL_PATH), "\033[91m\033[1m" + f"Model can't be found." + "\033[0m\033[0m"
-
-        CTX_MAX = 1024
-        LLAMA_THREADS_NUM = int(os.getenv("LLAMA_THREADS_NUM", 8))
-
-        print('Initialize model for evaluation')
-        llm = Llama(
-            model_path=LLAMA_MODEL_PATH,
-            n_ctx=CTX_MAX,
-            n_threads=LLAMA_THREADS_NUM,
-            n_batch=512,
-            use_mlock=False,
-        )
-
-        print('\nInitialize model for embedding')
-        llm_embed = Llama(
-            model_path=LLAMA_MODEL_PATH,
-            n_ctx=CTX_MAX,
-            n_threads=LLAMA_THREADS_NUM,
-            n_batch=512,
-            embedding=True,
-            use_mlock=False,
-        )
-
-        print(
-            "\033[91m\033[1m"
-            + "\n*****USING LLAMA.CPP. POTENTIALLY SLOW.*****"
-            + "\033[0m\033[0m"
-        )
-    else:
-        print(
-            "\033[91m\033[1m"
-            + "\nLlama LLM requires package llama-cpp. Falling back to GPT-3.5-turbo."
-            + "\033[0m\033[0m"
-        )
-        LLM_MODEL = "gpt-3.5-turbo"
+LLM_MODEL = "mistral"
 
 if LLM_MODEL.startswith("gpt-4"):
     print(
@@ -186,94 +144,30 @@ class LlamaEmbeddingFunction(EmbeddingFunction):
         return embeddings
 
 
-# Results storage using local ChromaDB
-class DefaultResultsStorage:
+class SimpleResultsStorage:
     def __init__(self):
-        logging.getLogger('chromadb').setLevel(logging.ERROR)
-        # Create Chroma collection
-        chroma_persist_dir = "chroma"
-        chroma_client = chromadb.PersistentClient(
-            settings=chromadb.config.Settings(
-                persist_directory=chroma_persist_dir,
-            )
-        )
+        self.storage = {}  # Stores task results keyed by task_id
+        self.task_metadata = {}  # Stores task metadata keyed by task_id for searching
 
-        metric = "cosine"
-        if LLM_MODEL.startswith("llama"):
-            embedding_function = LlamaEmbeddingFunction()
-        else:
-            embedding_function = OpenAIEmbeddingFunction(api_key=OPENAI_API_KEY)
-        self.collection = chroma_client.get_or_create_collection(
-            name=RESULTS_STORE_NAME,
-            metadata={"hnsw:space": metric},
-            embedding_function=embedding_function,
-        )
+    def add(self, task_id: str, result: str, task_metadata: dict):
+        """Add a task result and its metadata to the storage."""
+        self.storage[task_id] = result
+        self.task_metadata[task_id] = task_metadata
 
-    def add(self, task: Dict, result: str, result_id: str):
+    def query(self, query: str, top_results_num: int) -> list:
+        """Retrieve task results that match the query string, limited to top N results."""
+        matching_results = []
+        for task_id, metadata in self.task_metadata.items():
+            # Basic search: Check if query is in task metadata values
+            if any(query.lower() in str(value).lower() for value in metadata.values()):
+                matching_results.append((task_id, self.storage[task_id]))
 
-        # Break the function if LLM_MODEL starts with "human" (case-insensitive)
-        if LLM_MODEL.startswith("human"):
-            return
-        # Continue with the rest of the function
+        # Sort results by task_id or any other criteria if needed
+        # For simplicity, we'll just return the first N results
+        return matching_results[:top_results_num]
+# Before: results_storage.add(task, result, result_id)
+results_storage.add(result_id, result)
 
-        embeddings = llm_embed.embed(result) if LLM_MODEL.startswith("llama") else None
-        if (
-                len(self.collection.get(ids=[result_id], include=[])["ids"]) > 0
-        ):  # Check if the result already exists
-            self.collection.update(
-                ids=result_id,
-                embeddings=embeddings,
-                documents=result,
-                metadatas={"task": task["task_name"], "result": result},
-            )
-        else:
-            self.collection.add(
-                ids=result_id,
-                embeddings=embeddings,
-                documents=result,
-                metadatas={"task": task["task_name"], "result": result},
-            )
-
-    def query(self, query: str, top_results_num: int) -> List[dict]:
-        count: int = self.collection.count()
-        if count == 0:
-            return []
-        results = self.collection.query(
-            query_texts=query,
-            n_results=min(top_results_num, count),
-            include=["metadatas"]
-        )
-        return [item["task"] for item in results["metadatas"][0]]
-
-
-# Initialize results storage
-def try_weaviate():
-    WEAVIATE_URL = os.getenv("WEAVIATE_URL", "")
-    WEAVIATE_USE_EMBEDDED = os.getenv("WEAVIATE_USE_EMBEDDED", "False").lower() == "true"
-    if (WEAVIATE_URL or WEAVIATE_USE_EMBEDDED) and can_import("extensions.weaviate_storage"):
-        WEAVIATE_API_KEY = os.getenv("WEAVIATE_API_KEY", "")
-        from extensions.weaviate_storage import WeaviateResultsStorage
-        print("\nUsing results storage: " + "\033[93m\033[1m" + "Weaviate" + "\033[0m\033[0m")
-        return WeaviateResultsStorage(OPENAI_API_KEY, WEAVIATE_URL, WEAVIATE_API_KEY, WEAVIATE_USE_EMBEDDED, LLM_MODEL, LLAMA_MODEL_PATH, RESULTS_STORE_NAME, OBJECTIVE)
-    return None
-
-def try_pinecone():
-    PINECONE_API_KEY = os.getenv("PINECONE_API_KEY", "")
-    if PINECONE_API_KEY and can_import("extensions.pinecone_storage"):
-        PINECONE_ENVIRONMENT = os.getenv("PINECONE_ENVIRONMENT", "")
-        assert (
-            PINECONE_ENVIRONMENT
-        ), "\033[91m\033[1m" + "PINECONE_ENVIRONMENT environment variable is missing from .env" + "\033[0m\033[0m"
-        from extensions.pinecone_storage import PineconeResultsStorage
-        print("\nUsing results storage: " + "\033[93m\033[1m" + "Pinecone" + "\033[0m\033[0m")
-        return PineconeResultsStorage(OPENAI_API_KEY, PINECONE_API_KEY, PINECONE_ENVIRONMENT, LLM_MODEL, LLAMA_MODEL_PATH, RESULTS_STORE_NAME, OBJECTIVE)
-    return None
-
-def use_chroma():
-    print("\nUsing results storage: " + "\033[93m\033[1m" + "Chroma (Default)" + "\033[0m\033[0m")
-    return DefaultResultsStorage()
-
-results_storage = try_weaviate() or try_pinecone() or use_chroma()
 
 # Task storage supporting only a single instance of BabyAGI
 class SingleTaskListStorage:
@@ -338,34 +232,6 @@ def openai_call(
 ):
     while True:
         try:
-            if model.lower().startswith("llama"):
-                result = llm(prompt[:CTX_MAX],
-                             stop=["### Human"],
-                             echo=False,
-                             temperature=0.2,
-                             top_k=40,
-                             top_p=0.95,
-                             repeat_penalty=1.05,
-                             max_tokens=200)
-                # print('\n*****RESULT JSON DUMP*****\n')
-                # print(json.dumps(result))
-                # print('\n')
-                return result['choices'][0]['text'].strip()
-            elif model.lower().startswith("human"):
-                return user_input_await(prompt)
-            elif not model.lower().startswith("gpt-"):
-                # Use completion API
-                response = openai.Completion.create(
-                    engine=model,
-                    prompt=prompt,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    top_p=1,
-                    frequency_penalty=0,
-                    presence_penalty=0,
-                )
-                return response.choices[0].text.strip()
-            else:
                 # Use 4000 instead of the real limit (4097) to give a bit of wiggle room for the encoding of roles.
                 # TODO: different limits for different models.
 
@@ -376,10 +242,10 @@ def openai_call(
                 response = openai.ChatCompletion.create(
                     model=model,
                     messages=messages,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    n=1,
-                    stop=None,
+                    #temperature=temperature,
+                    #max_tokens=max_tokens,
+                    #n=1,
+                    #stop=None,
                 )
                 return response.choices[0].message.content.strip()
         except openai.error.RateLimitError:
@@ -576,7 +442,7 @@ def main():
 
             result_id = f"result_{task['task_id']}"
 
-            results_storage.add(task, result, result_id)
+            results_storage.add(result_id, result, task)
 
             # Step 3: Create new tasks and re-prioritize task list
             # only the main instance in cooperative mode does that
