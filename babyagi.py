@@ -11,16 +11,12 @@ from collections import deque
 from typing import Dict, List
 import importlib
 import openai
-import chromadb
+
 import tiktoken as tiktoken
-from chromadb.utils.embedding_functions import OpenAIEmbeddingFunction
-from chromadb.api.types import Documents, EmbeddingFunction, Embeddings
+
 import re
 
-# default opt out of chromadb telemetry.
-from chromadb.config import Settings
 
-client = chromadb.Client(Settings(anonymized_telemetry=False))
 
 # Engine configuration
 
@@ -29,12 +25,7 @@ LLM_MODEL = os.getenv("LLM_MODEL", os.getenv("OPENAI_API_MODEL", "gpt-3.5-turbo"
 
 # API Keys
 OPENAI_API_KEY = ''
-if not (LLM_MODEL.startswith("llama") or LLM_MODEL.startswith("human")):
-    assert OPENAI_API_KEY, "\033[91m\033[1m" + "OPENAI_API_KEY environment variable is missing from .env" + "\033[0m\033[0m"
 
-# Table config
-RESULTS_STORE_NAME = os.getenv("RESULTS_STORE_NAME", os.getenv("TABLE_NAME", ""))
-assert RESULTS_STORE_NAME, "\033[91m\033[1m" + "RESULTS_STORE_NAME environment variable is missing from .env" + "\033[0m\033[0m"
 
 # Run configuration
 INSTANCE_NAME = os.getenv("INSTANCE_NAME", os.getenv("BABY_NAME", "BabyAGI"))
@@ -42,8 +33,8 @@ COOPERATIVE_MODE = "none"
 JOIN_EXISTING_OBJECTIVE = False
 
 # Goal configuration
-OBJECTIVE = os.getenv("OBJECTIVE", "")
-INITIAL_TASK = os.getenv("INITIAL_TASK", os.getenv("FIRST_TASK", ""))
+OBJECTIVE = "solve the bible as if it were a code"
+INITIAL_TASK = "Break objective into smaller managable sub-tasks"
 
 # Model configuration
 OPENAI_TEMPERATURE = float(os.getenv("OPENAI_TEMPERATURE", 0.0))
@@ -58,66 +49,6 @@ def can_import(module_name):
     except ImportError:
         return False
 
-
-DOTENV_EXTENSIONS = os.getenv("DOTENV_EXTENSIONS", "").split(" ")
-
-# Command line arguments extension
-# Can override any of the above environment variables
-ENABLE_COMMAND_LINE_ARGS = (
-        os.getenv("ENABLE_COMMAND_LINE_ARGS", "false").lower() == "true"
-)
-if ENABLE_COMMAND_LINE_ARGS:
-    if can_import("extensions.argparseext"):
-        from extensions.argparseext import parse_arguments
-
-        OBJECTIVE, INITIAL_TASK, LLM_MODEL, DOTENV_EXTENSIONS, INSTANCE_NAME, COOPERATIVE_MODE, JOIN_EXISTING_OBJECTIVE = parse_arguments()
-
-# Human mode extension
-# Gives human input to babyagi
-if LLM_MODEL.startswith("human"):
-    if can_import("extensions.human_mode"):
-        from extensions.human_mode import user_input_await
-
-# Load additional environment variables for enabled extensions
-# TODO: This might override the following command line arguments as well:
-#    OBJECTIVE, INITIAL_TASK, LLM_MODEL, INSTANCE_NAME, COOPERATIVE_MODE, JOIN_EXISTING_OBJECTIVE
-if DOTENV_EXTENSIONS:
-    if can_import("extensions.dotenvext"):
-        from extensions.dotenvext import load_dotenv_extensions
-
-        load_dotenv_extensions(DOTENV_EXTENSIONS)
-
-# TODO: There's still work to be done here to enable people to get
-# defaults from dotenv extensions, but also provide command line
-# arguments to override them
-
-# Extensions support end
-
-print("\033[95m\033[1m" + "\n*****CONFIGURATION*****\n" + "\033[0m\033[0m")
-print(f"Name  : {INSTANCE_NAME}")
-print(f"Mode  : {'alone' if COOPERATIVE_MODE in ['n', 'none'] else 'local' if COOPERATIVE_MODE in ['l', 'local'] else 'distributed' if COOPERATIVE_MODE in ['d', 'distributed'] else 'undefined'}")
-print(f"LLM   : {LLM_MODEL}")
-
-
-# Check if we know what we are doing
-assert OBJECTIVE, "\033[91m\033[1m" + "OBJECTIVE environment variable is missing from .env" + "\033[0m\033[0m"
-assert INITIAL_TASK, "\033[91m\033[1m" + "INITIAL_TASK environment variable is missing from .env" + "\033[0m\033[0m"
-LLM_MODEL = "mistral"
-
-if LLM_MODEL.startswith("gpt-4"):
-    print(
-        "\033[91m\033[1m"
-        + "\n*****USING GPT-4. POTENTIALLY EXPENSIVE. MONITOR YOUR COSTS*****"
-        + "\033[0m\033[0m"
-    )
-
-if LLM_MODEL.startswith("human"):
-    print(
-        "\033[91m\033[1m"
-        + "\n*****USING HUMAN INPUT*****"
-        + "\033[0m\033[0m"
-    )
-
 print("\033[94m\033[1m" + "\n*****OBJECTIVE*****\n" + "\033[0m\033[0m")
 print(f"{OBJECTIVE}")
 
@@ -125,23 +56,9 @@ if not JOIN_EXISTING_OBJECTIVE:
     print("\033[93m\033[1m" + "\nInitial task:" + "\033[0m\033[0m" + f" {INITIAL_TASK}")
 else:
     print("\033[93m\033[1m" + f"\nJoining to help the objective" + "\033[0m\033[0m")
-
+openai.api_base = "http://localhost:1234/v1"
 # Configure OpenAI
 openai.api_key = OPENAI_API_KEY
-
-
-# Llama embedding function
-class LlamaEmbeddingFunction(EmbeddingFunction):
-    def __init__(self):
-        return
-
-
-    def __call__(self, texts: Documents) -> Embeddings:
-        embeddings = []
-        for t in texts:
-            e = llm_embed.embed(t)
-            embeddings.append(e)
-        return embeddings
 
 
 class SimpleResultsStorage:
@@ -165,9 +82,8 @@ class SimpleResultsStorage:
         # Sort results by task_id or any other criteria if needed
         # For simplicity, we'll just return the first N results
         return matching_results[:top_results_num]
-# Before: results_storage.add(task, result, result_id)
-results_storage.add(result_id, result)
-
+# results_storage = try_weaviate() or try_pinecone() or use_chroma()
+results_storage = SimpleResultsStorage()
 
 # Task storage supporting only a single instance of BabyAGI
 class SingleTaskListStorage:
